@@ -1,3 +1,4 @@
+# 2nd level models of the winning team (character level models)
 #%%
 import pickle
 import random
@@ -143,3 +144,35 @@ model_names = [a + ' : ' + m for m, a in MODELS]
 combs = [model_names]
 
 print('Using models : ', combs)
+# %% Character level tokenizer from https://huggingface.co/google/reformer-enwik8
+# Encoding
+def encode(list_of_strings, pad_token_id=0):
+    max_length = max([len(str.encode(string)) for string in list_of_strings])
+    print("Max length:", max_length)
+    # create emtpy tensors
+    attention_masks = torch.zeros((len(list_of_strings), max_length), dtype=torch.long)
+    input_ids = torch.full((len(list_of_strings), max_length), pad_token_id, dtype=torch.long)
+
+    for idx, string in enumerate(list_of_strings):
+        # make sure string is in byte format
+        if not isinstance(string, bytes):
+            string = str.encode(string)
+
+        #print(len(string), len(torch.tensor([x+2 for x in string])))
+        input_ids[idx, :len(string)] = torch.tensor([x + 2 for x in string])
+        attention_masks[idx, :len(string)] = 1
+
+    return input_ids, attention_masks
+
+# Decoding
+def decode(outputs_ids):
+    decoded_outputs = []
+    for output_ids in outputs_ids.tolist():
+        # transform id back to char IDs < 2 are simply transformed to ""
+        decoded_outputs.append("".join([chr(x - 2) if x > 1 else "" for x in output_ids]))
+    return decoded_outputs
+# %%
+ids, att_masks = encode(df_train['text'].values)
+# %%
+X_train = encode(df_train['text'].values)
+#X_test = encode(df_test['text'].values)
