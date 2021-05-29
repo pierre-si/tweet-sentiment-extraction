@@ -7,6 +7,7 @@ from tqdm import tqdm
 import numpy as np
 import pandas as pd
 import torch
+from torch.utils.data import Dataset
 # %%
 def seed_everything(seed):
     """
@@ -40,36 +41,36 @@ MODELS = [
 add_spaces_to = ["bert_", 'xlnet_', 'electra_', 'bertweet-']
 #%%
 
-def create_input_data(models):
-    char_pred_test_starts = []
-    char_pred_test_ends = []
+# def create_input_data(models):
+#     char_pred_test_starts = []
+#     char_pred_test_ends = []
 
-    for model, _ in models:
-        with open(model + 'char_pred_test_start.pkl', "rb") as fp:   #Pickling
-            probas = pickle.load(fp)  
+#     for model, _ in models:
+#         with open(model + 'char_pred_test_start.pkl', "rb") as fp:   #Pickling
+#             probas = pickle.load(fp)  
 
-            if model in add_spaces_to:
-                probas = [np.concatenate([np.array([0]), p]) for p in probas]
+#             if model in add_spaces_to:
+#                 probas = [np.concatenate([np.array([0]), p]) for p in probas]
 
-            char_pred_test_starts.append(probas)
+#             char_pred_test_starts.append(probas)
 
-        with open(model + 'char_pred_test_end.pkl', "rb") as fp:   #Pickling
-            probas = pickle.load(fp)
+#         with open(model + 'char_pred_test_end.pkl', "rb") as fp:   #Pickling
+#             probas = pickle.load(fp)
 
-            if model in add_spaces_to:
-                probas = [np.concatenate([np.array([0]), p]) for p in probas]
+#             if model in add_spaces_to:
+#                 probas = [np.concatenate([np.array([0]), p]) for p in probas]
 
-            char_pred_test_ends.append(probas)
+#             char_pred_test_ends.append(probas)
             
-    char_pred_test_start = [np.concatenate([char_pred_test_starts[m][i][:, np.newaxis] for m in range(len(models))], 
-                                           1) for i in range(len(char_pred_test_starts[0]))]
+#     char_pred_test_start = [np.concatenate([char_pred_test_starts[m][i][:, np.newaxis] for m in range(len(models))], 
+#                                            1) for i in range(len(char_pred_test_starts[0]))]
 
-    char_pred_test_end = [np.concatenate([char_pred_test_ends[m][i][:, np.newaxis] for m in range(len(models))], 
-                                         1) for i in range(len(char_pred_test_starts[0]))]
+#     char_pred_test_end = [np.concatenate([char_pred_test_ends[m][i][:, np.newaxis] for m in range(len(models))], 
+#                                          1) for i in range(len(char_pred_test_starts[0]))]
     
-    return char_pred_test_start, char_pred_test_end
+#     return char_pred_test_start, char_pred_test_end
 #%%
-char_pred_test_start, char_pred_test_end = create_input_data(MODELS)
+# char_pred_test_start, char_pred_test_end = create_input_data(MODELS)
 #%%
 def reorder(order_source, order_target, preds):
 #     assert len(order_source) == len(order_target) and len(order_target) == len(preds)
@@ -173,6 +174,78 @@ def decode(outputs_ids):
     return decoded_outputs
 # %%
 ids, att_masks = encode(df_train['text'].values)
+#%%
+errors = 0
+i = 0
+for text, id, att_mask in zip(df_train['text'], ids, att_masks):
+    try:
+        assert len(text) == att_mask.numpy().sum()
+    except:
+        errors+=1
+        #print(text, id)
+    i+=1
+# for 156 examples, len(text) is different than len(encoded_characters), because of characters such as Cafï¿½ .
 # %%
-X_train = encode(df_train['text'].values)
-#X_test = encode(df_test['text'].values)
+def generate_targets(texts, selected_texts, seq_length):
+    targs = np.zeros((len(texts), seq_length))
+    for i, (text, selected_text) in enumerate(zip(texts, selected_texts)):
+        assert text.find(selected_text) >= 0
+        # not correct for the few examples where len(text) != len(characters)
+        targs[i, text.find(selected_text):len(selected_text)] = 1
+    return targs
+#%%
+'''Second-level models
+input:
+1. unprocessed (not cleaned) sentences embedded at character level
+2. sentiment
+3. probabilities (transformers' outputs using cleaned text as input)
+training process:
+Adam optimizer
+Linear learning rate, no warmup
+smoothed cross entropy loss
+multi sample dropout
+5 epochs or 5 + 5 with Stochastic Weighted Average (average of the model weights during the last 5 epochs)
+Pseudo labeling?
+TODO: CNN and eventually Wavenet.
+'''
+#%% dataset
+class TweetSentimentDataset(Dataset):
+    def __init__(self, sentiments, start_probabilities, end_probabilities, characters, targets):
+        self.sentiments = sentiments
+        self.start_probabilities = start_probabilities
+        self.end_probabilities = end_probabilities
+        self.characters = characters
+        self.targets = targets
+    def __len__(self):
+        return len(self.sentiments)
+    def __getitem__(self, idx):
+        return {
+            'start_probabilities': self.start_probabilities[idx],
+            'end_probabilities': self.end_probabilities[idx],
+            'characters': self.characters[idx],
+            'targets': self.targets[idx]
+        }
+        # return torch.cat((self.sentiments[idx], self.start_probabilities[idx], self.end_probabilities[idx], self.characters[idx])), self.targets[idx]
+
+#%%
+y = generate_targets(df_train['text'].values, df_train['selected_text'].values, 159)
+#%%
+train_dataset = TweetSentimentDataset(df_train['sentiment'].astype('category').cat.codes.values, preds['oof_start'], preds['oof_end'], ids, y)
+#%% model
+
+class TweetSentimentCNN(nn.Module):
+    def __init__(self, n_models, max_token, dim=16):
+        self.conv_prob = nn.Conv1d(in_channels=n_models, out_channel=dim, kernel_size=3)
+        self.batchnorm = nn.BatchNorm1d(num_features=dim)
+
+        self.char_emb = nn.Embedding(num_embeddings=max_token, embedding_dim=dim, padding_idx=0)
+        self.sentiment_emb = nn.Embedding(num_embeddings=3, embedding_dim=dim, padding_idx=3) # there is no padding. 0 is used for a sentiment.
+
+        convs = []
+        for i in range(4):
+            convs.append(nn.Conv1d(in_channels=dim, out_channel=dim, kernel_size=3))
+            convs.append(nn.BatchNorm1d(num_features=dim))
+        self.convs = nn.Sequential(*convs)
+
+    def forward(self, probabilities, characters, sentiment):
+        pass
