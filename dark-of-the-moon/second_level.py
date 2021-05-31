@@ -7,8 +7,11 @@ from tqdm import tqdm
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import Dataset
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from torch.nn.utils.rnn import pad_sequence
 
+device = "cuda" if torch.cuda.is_available() else "cpu"
 # %%
 def seed_everything(seed):
     """
@@ -85,6 +88,7 @@ def reorder(order_source, order_target, preds):
     return new_preds
 
 
+# encoding tried: ISO-8859-1, latin1, utf-8, ISO-8859-3, utf-8-sig
 df_train = pd.read_csv(DATA_PATH + "train.csv").dropna().reset_index(drop=True)
 df_train = df_train.sample(frac=1, random_state=SEED).reset_index(drop=True)
 order_t = list(df_train["textID"].values)
@@ -156,8 +160,9 @@ combs = [model_names]
 print("Using models : ", combs)
 # %% Character level tokenizer from https://huggingface.co/google/reformer-enwik8
 # Encoding
-def encode(list_of_strings, pad_token_id=0):
-    max_length = max([len(str.encode(string)) for string in list_of_strings])
+def encode(list_of_strings, pad_token_id=0, max_length=None):
+    if max_length is None:
+        max_length = max([len(string) for string in list_of_strings])
     print("Max length:", max_length)
     # create emtpy tensors
     attention_masks = torch.zeros((len(list_of_strings), max_length), dtype=torch.long)
@@ -168,9 +173,12 @@ def encode(list_of_strings, pad_token_id=0):
     for idx, string in enumerate(list_of_strings):
         # make sure string is in byte format
         if not isinstance(string, bytes):
-            string = str.encode(string)
-
-        # print(len(string), len(torch.tensor([x+2 for x in string])))
+            bstring = str.encode(string)
+            # characters that take more than 1 byte (such as ï¿½) are truncated
+            # they appear in 156 examples
+            if len(bstring) != len(string):
+                bstring = [str.encode(c)[0] for c in string]
+            string = bstring
         input_ids[idx, : len(string)] = torch.tensor([x + 2 for x in string])
         attention_masks[idx, : len(string)] = 1
 
@@ -189,18 +197,16 @@ def decode(outputs_ids):
 
 
 # %%
-ids, att_masks = encode(df_train["text"].values)
+max_len = max([len(p) for p in preds["oof_start"]])
+ids, att_masks = encode(df_train["text"].values, max_length=max_len)
 #%%
 errors = 0
-i = 0
-for text, id, att_mask in zip(df_train["text"], ids, att_masks):
+for i, (text, id, att_mask) in enumerate(zip(df_train["text"], ids, att_masks)):
     try:
         assert len(text) == att_mask.numpy().sum()
     except:
         errors += 1
-        # print(text, id)
-    i += 1
-# for 156 examples, len(text) is different than len(encoded_characters), because of characters such as Cafï¿½ .
+        print(i, text)
 # %%
 def generate_targets(texts, selected_texts, seq_length):
     targs = np.zeros((len(texts), seq_length))
@@ -231,9 +237,15 @@ class TweetSentimentDataset(Dataset):
     def __init__(
         self, sentiments, start_probabilities, end_probabilities, characters, targets
     ):
-        self.sentiments = sentiments
-        self.start_probabilities = start_probabilities
-        self.end_probabilities = end_probabilities
+        self.sentiments = torch.tensor(sentiments, dtype=torch.int)
+        self.start_probabilities = pad_sequence(
+            [torch.tensor(p, dtype=torch.float32) for p in start_probabilities],
+            batch_first=True,
+        )
+        self.end_probabilities = pad_sequence(
+            [torch.tensor(p, dtype=torch.float32) for p in end_probabilities],
+            batch_first=True,
+        )
         self.characters = characters
         self.targets = targets
 
@@ -244,14 +256,22 @@ class TweetSentimentDataset(Dataset):
         return {
             "start_probabilities": self.start_probabilities[idx],
             "end_probabilities": self.end_probabilities[idx],
-            "characters": self.characters[idx],
+            "sentiments": self.sentiments[idx],
+            "tokens": self.characters[idx],
             "targets": self.targets[idx],
         }
         # return torch.cat((self.sentiments[idx], self.start_probabilities[idx], self.end_probabilities[idx], self.characters[idx])), self.targets[idx]
 
 
+# # if i ever want to do dynamic padding. (do not forget to do uniform size batching ie sorting by seq_len and to not pad characters and targets before giving it to the dataset)
+# def tweet_collate_fn(batch):
+#     start_prob = [torch.tensor(p) for p in batch['start_probabilities'])]
+#     start_prob = pad_sequence(start_prob, batch_first=True)
+#     end_prob = [torch.tensor(p) for p in batch['end_probabilities']]
+#     end_prob = pad_sequence(end_prob, batch_first=True)
+
 #%%
-y = generate_targets(df_train["text"].values, df_train["selected_text"].values, 159)
+y = generate_targets(df_train["text"].values, df_train["selected_text"].values, max_len)
 #%%
 train_dataset = TweetSentimentDataset(
     df_train["sentiment"].astype("category").cat.codes.values,
@@ -261,25 +281,54 @@ train_dataset = TweetSentimentDataset(
     y,
 )
 #%% model
-
-
 class TweetSentimentCNN(nn.Module):
     def __init__(self, n_models, max_token, dim=16):
-        self.conv_prob = nn.Conv1d(in_channels=n_models, out_channel=dim, kernel_size=3)
-        self.batchnorm = nn.BatchNorm1d(num_features=dim)
+        super().__init__()
+        self.prob_conv = nn.Conv1d(
+            in_channels=2 * n_models, out_channels=dim, kernel_size=3, padding=3 // 2
+        )
+        self.prob_norm = nn.BatchNorm1d(num_features=dim)
 
         self.char_emb = nn.Embedding(
             num_embeddings=max_token, embedding_dim=dim, padding_idx=0
         )
         self.sentiment_emb = nn.Embedding(
-            num_embeddings=3, embedding_dim=dim, padding_idx=3
+            num_embeddings=3, embedding_dim=dim, padding_idx=-1
         )  # there is no padding. 0 is used for a sentiment.
 
         convs = []
         for i in range(4):
-            convs.append(nn.Conv1d(in_channels=dim, out_channel=dim, kernel_size=3))
+            convs.append(nn.Conv1d(in_channels=dim, out_channels=dim, kernel_size=3))
             convs.append(nn.BatchNorm1d(num_features=dim))
         self.convs = nn.Sequential(*convs)
 
-    def forward(self, probabilities, characters, sentiment):
-        pass
+        self.lin = nn.Linear(dim, 1)  # embedding wise linear.
+        self.softmax = nn.Softmax()
+
+    def forward(self, start_probabilities, end_probabilities, tokens, sentiment):
+        prob = torch.cat((start_probabilities, end_probabilities), -1).transpose(1, 2)
+        prob = self.prob_conv(prob)
+        prob = self.prob_norm(prob)
+        tokens = self.char_emb(tokens)
+        sent = self.sentiment_emb(sentiment)
+        print(prob.size())
+        print(sent.unsqueeze(2).size())
+        x = torch.cat((prob, tokens.transpose(1, 2), sent), dim=1)
+        x = self.convs(x)
+        x = self.lin(x)
+        return self.softmax(x)
+
+
+# %%
+cnn = TweetSentimentCNN(n_models, ids.max().item())
+# %%
+train_loader = DataLoader(train_dataset, batch_size=8)
+# %%
+for i, t in enumerate(train_loader):
+    print(i)
+    if i > 0:
+        break
+# %%
+cnn(t["start_probabilities"], t["end_probabilities"], t["tokens"], t["sentiments"])
+# %%
+# problème : la taille après padding de probabilities correspondant au max de len(text) est différente de celle de characters correspondant ~ au max de len( byte encoded text)
