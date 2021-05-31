@@ -298,24 +298,32 @@ class TweetSentimentCNN(nn.Module):
 
         convs = []
         for i in range(4):
-            convs.append(nn.Conv1d(in_channels=dim, out_channels=dim, kernel_size=3))
-            convs.append(nn.BatchNorm1d(num_features=dim))
+            convs.append(
+                nn.Conv1d(
+                    in_channels=3 * dim,
+                    out_channels=3 * dim,
+                    kernel_size=3,
+                    padding=3 // 2,
+                )
+            )
+            convs.append(nn.BatchNorm1d(num_features=3 * dim))
         self.convs = nn.Sequential(*convs)
 
-        self.lin = nn.Linear(dim, 1)  # embedding wise linear.
-        self.softmax = nn.Softmax()
+        self.lin = nn.Linear(3 * dim, 2)  # embedding wise linear.
+        self.softmax = nn.Softmax(dim=1)
 
     def forward(self, start_probabilities, end_probabilities, tokens, sentiment):
+        L = start_probabilities.size()[1]
         prob = torch.cat((start_probabilities, end_probabilities), -1).transpose(1, 2)
         prob = self.prob_conv(prob)
         prob = self.prob_norm(prob)
         tokens = self.char_emb(tokens)
-        sent = self.sentiment_emb(sentiment)
+        sent = self.sentiment_emb(sentiment).unsqueeze(2).repeat((1, 1, L))
         print(prob.size())
-        print(sent.unsqueeze(2).size())
+        print(sent.size())
         x = torch.cat((prob, tokens.transpose(1, 2), sent), dim=1)
-        x = self.convs(x)
-        x = self.lin(x)
+        x = self.convs(x)  # N×C×L
+        x = self.lin(x.transpose(1, 2))  # N×L×2
         return self.softmax(x)
 
 
@@ -330,5 +338,3 @@ for i, t in enumerate(train_loader):
         break
 # %%
 cnn(t["start_probabilities"], t["end_probabilities"], t["tokens"], t["sentiments"])
-# %%
-# problème : la taille après padding de probabilities correspondant au max de len(text) est différente de celle de characters correspondant ~ au max de len( byte encoded text)
