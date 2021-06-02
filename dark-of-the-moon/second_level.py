@@ -209,12 +209,21 @@ for i, (text, id, att_mask) in enumerate(zip(df_train["text"], ids, att_masks)):
         print(i, text)
 # %%
 def generate_targets(texts, selected_texts, seq_length):
-    targs = np.zeros((len(texts), seq_length))
+    y = np.zeros((len(texts), seq_length, 2))
+    y_combined = np.zeros((len(texts), seq_length))
+    y_start = []
+    y_end = []
     for i, (text, selected_text) in enumerate(zip(texts, selected_texts)):
         assert text.find(selected_text) >= 0
         # not correct for the few examples where len(text) != len(characters)
-        targs[i, text.find(selected_text) : len(selected_text)] = 1
-    return targs
+        start = text.find(selected_text)
+        end = start + len(selected_text)
+        y[i, start, 0] = 1
+        y[i, end, 1] = 1
+        y_start.append(start)
+        y_end.append(end)
+        y_combined[i, start:end] = 1
+    return y, y_combined, y_start, y_end
 
 
 #%%
@@ -231,6 +240,11 @@ multi sample dropout
 5 epochs or 5 + 5 with Stochastic Weighted Average (average of the model weights during the last 5 epochs)
 Pseudo labeling?
 TODO: CNN and eventually Wavenet.
+TODO: try to predict if tokens belong to the excerpt or not instead of predicting the probability to be the first and to be the last.
+
+ypred_start = [0.05, 0.04, 0.04, 0.57, 0.12, …]
+y_start = […, 0, 1, 0, …]
+y_end = […, 0, 1, 0, …]
 """
 #%% dataset
 class TweetSentimentDataset(Dataset):
@@ -271,18 +285,20 @@ class TweetSentimentDataset(Dataset):
 #     end_prob = pad_sequence(end_prob, batch_first=True)
 
 #%%
-y = generate_targets(df_train["text"].values, df_train["selected_text"].values, max_len)
+y, y_combined, y_start, y_end = generate_targets(
+    df_train["text"].values, df_train["selected_text"].values, max_len
+)
 #%%
 train_dataset = TweetSentimentDataset(
     df_train["sentiment"].astype("category").cat.codes.values,
     preds["oof_start"],
     preds["oof_end"],
     ids,
-    y,
+    torch.tensor((y_start, y_end)).T,
 )
 #%% model
 class TweetSentimentCNN(nn.Module):
-    def __init__(self, n_models, max_token, dim=16):
+    def __init__(self, n_models, n_tokens, dim=16):
         super().__init__()
         self.prob_conv = nn.Conv1d(
             in_channels=2 * n_models, out_channels=dim, kernel_size=3, padding=3 // 2
@@ -290,7 +306,7 @@ class TweetSentimentCNN(nn.Module):
         self.prob_norm = nn.BatchNorm1d(num_features=dim)
 
         self.char_emb = nn.Embedding(
-            num_embeddings=max_token, embedding_dim=dim, padding_idx=0
+            num_embeddings=n_tokens, embedding_dim=dim, padding_idx=0
         )
         self.sentiment_emb = nn.Embedding(
             num_embeddings=3, embedding_dim=dim, padding_idx=-1
@@ -310,7 +326,7 @@ class TweetSentimentCNN(nn.Module):
         self.convs = nn.Sequential(*convs)
 
         self.lin = nn.Linear(3 * dim, 2)  # embedding wise linear.
-        self.softmax = nn.Softmax(dim=1)
+        # self.softmax = nn.Softmax(dim=1)
 
     def forward(self, start_probabilities, end_probabilities, tokens, sentiment):
         L = start_probabilities.size()[1]
@@ -319,22 +335,55 @@ class TweetSentimentCNN(nn.Module):
         prob = self.prob_norm(prob)
         tokens = self.char_emb(tokens)
         sent = self.sentiment_emb(sentiment).unsqueeze(2).repeat((1, 1, L))
-        print(prob.size())
-        print(sent.size())
         x = torch.cat((prob, tokens.transpose(1, 2), sent), dim=1)
         x = self.convs(x)  # N×C×L
         x = self.lin(x.transpose(1, 2))  # N×L×2
-        return self.softmax(x)
+        return x
 
 
+#%%
+from torch.nn import CrossEntropyLoss
+import torch.optim as optim
+from torch.utils.tensorboard import SummaryWriter
+
 # %%
-cnn = TweetSentimentCNN(n_models, ids.max().item())
-# %%
+model = TweetSentimentCNN(n_models, ids.max().item() + 1).to(device)
+LEARNING_RATE = 4e-5
+optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE)
 train_loader = DataLoader(train_dataset, batch_size=8)
+criterion = CrossEntropyLoss()
+#%%
+from statistics import mean
+
 # %%
-for i, t in enumerate(train_loader):
-    print(i)
-    if i > 0:
-        break
+epochs = 5
+LOG_DIR = "tensorboard"
+train_writer = SummaryWriter(os.path.join(LOG_DIR, "train"))
+
+losses = []
+for e in range(epochs):
+    model.train()
+    e_losses = []
+    y_true = []
+    y_score = []
+    print("Epoch ", e)
+    for batch in train_loader:  # val_loader:
+        ypreds = model(
+            batch["start_probabilities"].to(device),
+            batch["end_probabilities"].to(device),
+            batch["tokens"].to(device),
+            batch["sentiments"].to(device),
+        )
+        loss = criterion(ypreds, batch["targets"].to(device))
+        with torch.no_grad():
+            e_losses.append(float(loss))
+
+        model.zero_grad()
+        loss.backward()
+        optimizer.step()
+    losses.append(mean(e_losses))
+    print("Train loss:", "{:.3f}".format(losses[-1]), end="\n")
+    train_writer.add_scalar("Loss", losses[-1], e)
+
+train_writer.close()
 # %%
-cnn(t["start_probabilities"], t["end_probabilities"], t["tokens"], t["sentiments"])
