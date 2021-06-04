@@ -206,11 +206,20 @@ TODO: try to predict if tokens belong to the excerpt or not instead of predictin
 ypred_start = [0.05, 0.04, 0.04, 0.57, 0.12, …]
 y_start = […, 0, 1, 0, …]
 y_end = […, 0, 1, 0, …]
+
+Objectif: Jaccard score ≃ .73
 """
 #%% dataset
 class TweetSentimentDataset(Dataset):
     def __init__(
-        self, sentiments, start_probabilities, end_probabilities, characters, targets
+        self,
+        sentiments,
+        start_probabilities,
+        end_probabilities,
+        characters,
+        targets,
+        texts,
+        selected_texts,
     ):
         self.sentiments = torch.tensor(sentiments, dtype=torch.int)
         self.start_probabilities = pad_sequence(
@@ -223,6 +232,8 @@ class TweetSentimentDataset(Dataset):
         )
         self.characters = characters
         self.targets = targets
+        self.texts = texts
+        self.selected_texts = selected_texts
 
     def __len__(self):
         return len(self.sentiments)
@@ -231,9 +242,11 @@ class TweetSentimentDataset(Dataset):
         return {
             "start_probabilities": self.start_probabilities[idx],
             "end_probabilities": self.end_probabilities[idx],
-            "sentiments": self.sentiments[idx],
+            "sentiment": self.sentiments[idx],
             "tokens": self.characters[idx],
             "targets": self.targets[idx],
+            "text": self.texts[idx],
+            "selected_text": self.selected_texts[idx],
         }
         # return torch.cat((self.sentiments[idx], self.start_probabilities[idx], self.end_probabilities[idx], self.characters[idx])), self.targets[idx]
 
@@ -290,6 +303,66 @@ class TweetSentimentCNN(nn.Module):
         return x
 
 
+def logits_to_string(logits, text):
+    """Transforms logit predictions to a text selection
+    Assumes that logits[i] corresponds to text[i].
+    Takes the full words at the start and the end of the selection.
+    """
+    # TODO option to truncate the end_logits to [start_index:] to force end_index to be > start_index
+    start_idx, end_idx = logits[: len(text)].argmax(dim=0).cpu().numpy()
+    if end_idx <= start_idx:
+        return text
+    else:
+        while text[start_idx] != " " and start_idx > 0:
+            start_idx -= 1
+        while text[end_idx] != " " and end_idx < len(text) - 1:
+            end_idx += 1
+        return text[start_idx:end_idx]
+
+
+#%% metrics
+def words_jaccard(str1, str2):
+    a = set(str1.lower().split())
+    b = set(str2.lower().split())
+    c = a.intersection(b)
+    return float(len(c)) / (len(a) + len(b) - len(c))
+
+
+def evaluate(model, iterator, criterion):
+    model.eval()
+    losses = []
+    jaccards = []
+    with torch.no_grad():
+        for i, batch in enumerate(iterator):
+            ypreds = model(
+                batch["start_probabilities"].to(device),
+                batch["end_probabilities"].to(device),
+                batch["tokens"].to(device),
+                batch["sentiment"].to(device),
+            )
+            pred_selections = [
+                logits_to_string(logits, text)
+                for logits, text in zip(ypreds, batch["text"])
+            ]
+
+            y = batch["targets"].to(device)
+            true_selections = batch["selected_text"]
+
+            losses.append(float(criterion(ypreds, y)))
+            jaccards.append(
+                mean(
+                    [
+                        words_jaccard(pred_selection, true_selection)
+                        for pred_selection, true_selection in zip(
+                            pred_selections, true_selections
+                        )
+                    ]
+                )
+            )
+
+    return mean(losses), mean(jaccards)
+
+
 #%%
 max_len = max([len(p) for p in preds["oof_start"]])
 ids, att_masks = encode(df_train["text"].values, max_length=max_len)
@@ -312,6 +385,8 @@ train_dataset = TweetSentimentDataset(
     preds["oof_end"],
     ids,
     torch.tensor((y_start, y_end)).T,
+    df_train["text"],
+    df_train["selected_text"],
 )
 train_loader = DataLoader(train_dataset, batch_size=8)
 # %%
@@ -320,34 +395,35 @@ LEARNING_RATE = 4e-5
 optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE)
 criterion = CrossEntropyLoss()
 # %%
-epochs = 5
+epochs = 10
 LOG_DIR = "tensorboard"
 train_writer = SummaryWriter(os.path.join(LOG_DIR, "train"))
+eval_steps = 100
 
-losses = []
+step = 0
+model.train()
 for e in range(epochs):
-    model.train()
-    e_losses = []
-    y_true = []
-    y_score = []
     print("Epoch ", e)
     for batch in train_loader:
         ypreds = model(
             batch["start_probabilities"].to(device),
             batch["end_probabilities"].to(device),
             batch["tokens"].to(device),
-            batch["sentiments"].to(device),
+            batch["sentiment"].to(device),
         )
         loss = criterion(ypreds, batch["targets"].to(device))
-        with torch.no_grad():
-            e_losses.append(float(loss))
-
         model.zero_grad()
         loss.backward()
         optimizer.step()
-    losses.append(mean(e_losses))
-    print("Train loss:", "{:.3f}".format(losses[-1]), end="\n")
-    train_writer.add_scalar("Loss", losses[-1], e)
+
+        step += 1
+        if step % eval_steps == 0:
+            loss, jaccard_score = evaluate(model, train_loader, criterion)
+            print("Step n°", step, end=" ")
+            print("Train loss:", "{:.3f}".format(loss), end=" ")
+            print("Jaccard score:", "{:.3f}".format(jaccard_score), end="\n")
+            train_writer.add_scalar("Loss", loss, step)
+            train_writer.add_scalar("Jaccard", jaccard_score, step)
 
 train_writer.close()
 # %%
