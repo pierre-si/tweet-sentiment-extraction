@@ -2,14 +2,18 @@
 #%%
 import pickle
 import random
+from statistics import mean
 
 from tqdm import tqdm
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
+import torch.optim as optim
+from torch.nn import CrossEntropyLoss
 from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data import Dataset, DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 # %%
@@ -44,38 +48,6 @@ MODELS = [
 ]
 
 add_spaces_to = ["bert_", "xlnet_", "electra_", "bertweet-"]
-#%%
-
-# def create_input_data(models):
-#     char_pred_test_starts = []
-#     char_pred_test_ends = []
-
-#     for model, _ in models:
-#         with open(model + 'char_pred_test_start.pkl', "rb") as fp:   #Pickling
-#             probas = pickle.load(fp)
-
-#             if model in add_spaces_to:
-#                 probas = [np.concatenate([np.array([0]), p]) for p in probas]
-
-#             char_pred_test_starts.append(probas)
-
-#         with open(model + 'char_pred_test_end.pkl', "rb") as fp:   #Pickling
-#             probas = pickle.load(fp)
-
-#             if model in add_spaces_to:
-#                 probas = [np.concatenate([np.array([0]), p]) for p in probas]
-
-#             char_pred_test_ends.append(probas)
-
-#     char_pred_test_start = [np.concatenate([char_pred_test_starts[m][i][:, np.newaxis] for m in range(len(models))],
-#                                            1) for i in range(len(char_pred_test_starts[0]))]
-
-#     char_pred_test_end = [np.concatenate([char_pred_test_ends[m][i][:, np.newaxis] for m in range(len(models))],
-#                                          1) for i in range(len(char_pred_test_starts[0]))]
-
-#     return char_pred_test_start, char_pred_test_end
-#%%
-# char_pred_test_start, char_pred_test_end = create_input_data(MODELS)
 #%%
 def reorder(order_source, order_target, preds):
     #     assert len(order_source) == len(order_target) and len(order_target) == len(preds)
@@ -197,17 +169,6 @@ def decode(outputs_ids):
 
 
 # %%
-max_len = max([len(p) for p in preds["oof_start"]])
-ids, att_masks = encode(df_train["text"].values, max_length=max_len)
-#%%
-errors = 0
-for i, (text, id, att_mask) in enumerate(zip(df_train["text"], ids, att_masks)):
-    try:
-        assert len(text) == att_mask.numpy().sum()
-    except:
-        errors += 1
-        print(i, text)
-# %%
 def generate_targets(texts, selected_texts, seq_length):
     y = np.zeros((len(texts), seq_length, 2))
     y_combined = np.zeros((len(texts), seq_length))
@@ -284,18 +245,6 @@ class TweetSentimentDataset(Dataset):
 #     end_prob = [torch.tensor(p) for p in batch['end_probabilities']]
 #     end_prob = pad_sequence(end_prob, batch_first=True)
 
-#%%
-y, y_combined, y_start, y_end = generate_targets(
-    df_train["text"].values, df_train["selected_text"].values, max_len
-)
-#%%
-train_dataset = TweetSentimentDataset(
-    df_train["sentiment"].astype("category").cat.codes.values,
-    preds["oof_start"],
-    preds["oof_end"],
-    ids,
-    torch.tensor((y_start, y_end)).T,
-)
 #%% model
 class TweetSentimentCNN(nn.Module):
     def __init__(self, n_models, n_tokens, dim=16):
@@ -342,19 +291,34 @@ class TweetSentimentCNN(nn.Module):
 
 
 #%%
-from torch.nn import CrossEntropyLoss
-import torch.optim as optim
-from torch.utils.tensorboard import SummaryWriter
-
+max_len = max([len(p) for p in preds["oof_start"]])
+ids, att_masks = encode(df_train["text"].values, max_length=max_len)
+#%%
+errors = 0
+for i, (text, id, att_mask) in enumerate(zip(df_train["text"], ids, att_masks)):
+    try:
+        assert len(text) == att_mask.numpy().sum()
+    except:
+        errors += 1
+        print(i, text)
+#%%
+y, y_combined, y_start, y_end = generate_targets(
+    df_train["text"].values, df_train["selected_text"].values, max_len
+)
+#%%
+train_dataset = TweetSentimentDataset(
+    df_train["sentiment"].astype("category").cat.codes.values,
+    preds["oof_start"],
+    preds["oof_end"],
+    ids,
+    torch.tensor((y_start, y_end)).T,
+)
+train_loader = DataLoader(train_dataset, batch_size=8)
 # %%
 model = TweetSentimentCNN(n_models, ids.max().item() + 1).to(device)
 LEARNING_RATE = 4e-5
 optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE)
-train_loader = DataLoader(train_dataset, batch_size=8)
 criterion = CrossEntropyLoss()
-#%%
-from statistics import mean
-
 # %%
 epochs = 5
 LOG_DIR = "tensorboard"
@@ -367,7 +331,7 @@ for e in range(epochs):
     y_true = []
     y_score = []
     print("Epoch ", e)
-    for batch in train_loader:  # val_loader:
+    for batch in train_loader:
         ypreds = model(
             batch["start_probabilities"].to(device),
             batch["end_probabilities"].to(device),
