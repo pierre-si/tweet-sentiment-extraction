@@ -181,7 +181,8 @@ def generate_targets(texts, selected_texts, seq_length):
         assert text.find(selected_text) >= 0
         # not correct for the few examples where len(text) != len(characters)
         start = text.find(selected_text)
-        end = start + len(selected_text)
+        # end is the index of the last character
+        end = start + len(selected_text) - 1
         y[i, start, 0] = 1
         y[i, end, 1] = 1
         y_start.append(start)
@@ -318,7 +319,7 @@ def logits_to_string(logits, text):
     else:
         while text[start_idx] != " " and start_idx > 0:
             start_idx -= 1
-        while text[end_idx] != " " and end_idx < len(text) - 1:
+        while end_idx < len(text) and text[end_idx] != " ":
             end_idx += 1
         return text[start_idx:end_idx]
 
@@ -331,12 +332,12 @@ def words_jaccard(str1, str2):
     return float(len(c)) / (len(a) + len(b) - len(c))
 
 
-def evaluate(model, iterable, criterion):
+def evaluate(model, dataloader, criterion):
     model.eval()
     losses = []
     jaccards = []
     with torch.no_grad():
-        for batch in iterable:
+        for batch in dataloader:
             ypreds = model(
                 batch["start_probabilities"].to(device),
                 batch["end_probabilities"].to(device),
@@ -415,7 +416,8 @@ def train(
                         writer.add_scalar("eval/loss", val_loss, step)
                         writer.add_scalar("eval/jaccard", val_jaccard, step)
 
-    writer.close()
+    if log_dir is not None:
+        writer.close()
 
 
 #%%
@@ -474,10 +476,11 @@ dataset = TweetSentimentDataset(
     df_train["selected_text"],
 )
 #%%
-train_loader = DataLoader(dataset, batch_size=8)
+train_loader = DataLoader(dataset, batch_size=16)
 model = TweetSentimentCNN(n_models, ids.max().item() + 1).to(device)
 
-train(model, train_loader)
+train(model, train_loader, log_dir=None)
+criterion = CrossEntropyLoss()
+evaluate(model, train_loader, criterion)
 #%%
-cross_validate(TweetSentimentCNN, dataset)
-# %%
+models = cross_validate(TweetSentimentCNN, dataset)
