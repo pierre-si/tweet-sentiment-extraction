@@ -1,5 +1,6 @@
 # 2nd level models of the winning team (character level models)
 #%%
+from pathlib import Path
 import pickle
 import random
 from statistics import mean
@@ -7,12 +8,13 @@ from statistics import mean
 from tqdm import tqdm
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import StratifiedKFold
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.nn import CrossEntropyLoss
 from torch.nn.utils.rnn import pad_sequence
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, Subset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -328,12 +330,12 @@ def words_jaccard(str1, str2):
     return float(len(c)) / (len(a) + len(b) - len(c))
 
 
-def evaluate(model, iterator, criterion):
+def evaluate(model, iterable, criterion):
     model.eval()
     losses = []
     jaccards = []
     with torch.no_grad():
-        for i, batch in enumerate(iterator):
+        for batch in iterable:
             ypreds = model(
                 batch["start_probabilities"].to(device),
                 batch["end_probabilities"].to(device),
@@ -363,6 +365,58 @@ def evaluate(model, iterator, criterion):
     return mean(losses), mean(jaccards)
 
 
+# %%
+def train(
+    model,
+    train_loader,
+    val_loader=None,
+    epochs=10,
+    eval_steps=100,
+    log_dir="tensorboard",
+):
+    lr = 4e-4
+    optimizer = optim.AdamW(model.parameters(), lr=lr)
+    criterion = CrossEntropyLoss()
+
+    if log_dir is not None:
+        writer = SummaryWriter(log_dir)
+
+    step = 0
+    for e in range(epochs):
+        print("Epoch ", e)
+        for batch in train_loader:
+            model.train()
+            ypreds = model(
+                batch["start_probabilities"].to(device),
+                batch["end_probabilities"].to(device),
+                batch["tokens"].to(device),
+                batch["sentiment"].to(device),
+            )
+            loss = criterion(ypreds, batch["targets"].to(device))
+            model.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            step += 1
+            if step % eval_steps == 0:
+                train_loss, train_jaccard = evaluate(model, train_loader, criterion)
+                print("Step", step, end=" ")
+                print("Train loss:", "{:.3f}".format(train_loss), end=" ")
+                print("Train jaccard:", "{:.3f}".format(train_jaccard), end="\n")
+                if log_dir is not None:
+                    writer.add_scalar("train/loss", train_loss, step)
+                    writer.add_scalar("train/jaccard", train_jaccard, step)
+                if val_loader is not None:
+                    val_loss, val_jaccard = evaluate(model, val_loader, criterion)
+                    print("Valid loss:", "{:.3f}".format(val_loss), end=" ")
+                    print("Valid jaccard:", "{:.3f}".format(val_jaccard), end="\n")
+                    if log_dir is not None:
+                        writer.add_scalar("eval/loss", val_loss, step)
+                        writer.add_scalar("eval/jaccard", val_jaccard, step)
+
+    writer.close()
+
+
 #%%
 max_len = max([len(p) for p in preds["oof_start"]])
 ids, att_masks = encode(df_train["text"].values, max_length=max_len)
@@ -389,41 +443,6 @@ train_dataset = TweetSentimentDataset(
     df_train["selected_text"],
 )
 train_loader = DataLoader(train_dataset, batch_size=8)
-# %%
+#%%
 model = TweetSentimentCNN(n_models, ids.max().item() + 1).to(device)
-LEARNING_RATE = 4e-5
-optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE)
-criterion = CrossEntropyLoss()
-# %%
-epochs = 10
-LOG_DIR = "tensorboard"
-train_writer = SummaryWriter(os.path.join(LOG_DIR, "train"))
-eval_steps = 100
-
-step = 0
-model.train()
-for e in range(epochs):
-    print("Epoch ", e)
-    for batch in train_loader:
-        ypreds = model(
-            batch["start_probabilities"].to(device),
-            batch["end_probabilities"].to(device),
-            batch["tokens"].to(device),
-            batch["sentiment"].to(device),
-        )
-        loss = criterion(ypreds, batch["targets"].to(device))
-        model.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-        step += 1
-        if step % eval_steps == 0:
-            loss, jaccard_score = evaluate(model, train_loader, criterion)
-            print("Step n°", step, end=" ")
-            print("Train loss:", "{:.3f}".format(loss), end=" ")
-            print("Jaccard score:", "{:.3f}".format(jaccard_score), end="\n")
-            train_writer.add_scalar("Loss", loss, step)
-            train_writer.add_scalar("Jaccard", jaccard_score, step)
-
-train_writer.close()
-# %%
+train(model, train_loader)
