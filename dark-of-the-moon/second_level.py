@@ -325,6 +325,31 @@ def logits_to_string(logits, text):
 
 
 #%% metrics
+# from Huggingface's LabelSmoother
+class LabelSmoothingCrossEntropy:
+    def __init__(self, eps=0.1, ignore_index=-100):
+        self.epsilon = eps
+        self.ignore_index = ignore_index
+
+    # logits has dim B×Class(i.e. seq length)×2
+    # labels has dim B×2
+    def __call__(self, logits, labels):
+        log_probs = -torch.nn.functional.log_softmax(logits, dim=1)
+        # labels has now dim B×1×2
+        if labels.dim() == log_probs.dim() - 1:
+            labels = labels.unsqueeze(1)
+        # nll_loss is logsoftmax(x_class)
+        nll_loss = log_probs.gather(dim=1, index=labels)
+        # works for fp16 input tensor too, by internally upcasting it to fp32
+        smoothed_loss = log_probs.sum(dim=1, keepdim=True, dtype=torch.float32)
+
+        # Take the mean over the label dimensions, then divide by the number of active elements (i.e. not-padded):
+        num_active_elements = labels.numel()
+        nll_loss = nll_loss.sum() / num_active_elements
+        smoothed_loss = smoothed_loss.sum() / (num_active_elements * log_probs.shape[1])
+        return (1 - self.epsilon) * nll_loss + self.epsilon * smoothed_loss
+
+
 def words_jaccard(str1, str2):
     a = set(str1.lower().split())
     b = set(str2.lower().split())
@@ -378,7 +403,8 @@ def train(
 ):
     lr = 4e-4
     optimizer = optim.AdamW(model.parameters(), lr=lr)
-    criterion = CrossEntropyLoss()
+    # criterion = CrossEntropyLoss()
+    criterion = LabelSmoothingCrossEntropy(eps=0.1)
 
     if log_dir is not None:
         writer = SummaryWriter(log_dir)
@@ -484,3 +510,5 @@ criterion = CrossEntropyLoss()
 evaluate(model, train_loader, criterion)
 #%%
 models = cross_validate(TweetSentimentCNN, dataset)
+
+# %%
