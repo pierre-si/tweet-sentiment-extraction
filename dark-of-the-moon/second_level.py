@@ -1,6 +1,7 @@
 # 2nd level models of the winning team (character level models)
 #%%
 from pathlib import Path
+from copy import deepcopy
 import pickle
 import random
 from statistics import mean
@@ -400,7 +401,7 @@ def train(
             step += 1
             if step % eval_steps == 0:
                 train_loss, train_jaccard = evaluate(model, train_loader, criterion)
-                print("Step", step, end=" ")
+                print("Step", step, end="\n")
                 print("Train loss:", "{:.3f}".format(train_loss), end=" ")
                 print("Train jaccard:", "{:.3f}".format(train_jaccard), end="\n")
                 if log_dir is not None:
@@ -415,6 +416,36 @@ def train(
                         writer.add_scalar("eval/jaccard", val_jaccard, step)
 
     writer.close()
+
+
+#%%
+def cross_validate(model, dataset, epochs=10, n_splits=5):
+    folds = StratifiedKFold(n_splits=n_splits)
+    n_samples = len(dataset)
+
+    models = []
+    # stratify based on sentiment.
+    for i, (train_idx, test_idx) in enumerate(
+        folds.split(np.zeros(n_samples), dataset.sentiments)
+    ):
+        print("Fold", i)
+        train_dataset = Subset(dataset, train_idx)
+        val_dataset = Subset(dataset, test_idx)
+        train_loader = DataLoader(train_dataset, batch_size=16)
+        val_loader = DataLoader(val_dataset, batch_size=16)
+
+        m = model(n_models, ids.max().item() + 1).to(device)
+        train(
+            m,
+            train_loader,
+            val_loader,
+            epochs=epochs,
+            eval_steps=100,
+            log_dir=Path("tensorboard") / ("fold" + str(i)),
+        )
+        models.append(deepcopy(m))
+
+    return models
 
 
 #%%
@@ -433,7 +464,7 @@ y, y_combined, y_start, y_end = generate_targets(
     df_train["text"].values, df_train["selected_text"].values, max_len
 )
 #%%
-train_dataset = TweetSentimentDataset(
+dataset = TweetSentimentDataset(
     df_train["sentiment"].astype("category").cat.codes.values,
     preds["oof_start"],
     preds["oof_end"],
@@ -442,7 +473,11 @@ train_dataset = TweetSentimentDataset(
     df_train["text"],
     df_train["selected_text"],
 )
-train_loader = DataLoader(train_dataset, batch_size=8)
 #%%
+train_loader = DataLoader(dataset, batch_size=8)
 model = TweetSentimentCNN(n_models, ids.max().item() + 1).to(device)
+
 train(model, train_loader)
+#%%
+cross_validate(TweetSentimentCNN, dataset)
+# %%
