@@ -331,18 +331,20 @@ class TweetSentimentCNN(nn.Module):
 def logits_to_string(logits, text):
     """Transforms logit predictions to a text selection
     Assumes that logits[i] corresponds to text[i].
-    Takes the full words at the start and the end of the selection.
     """
     # TODO option to truncate the end_logits to [start_index:] to force end_index to be > start_index
-    start_idx, end_idx = logits[: len(text)].argmax(dim=0).cpu().numpy()
+
+    # start_idx, end_idx = logits[: len(text)].argmax(dim=0).cpu().numpy()
+    start_idx, end_idx = logits.argmax(dim=0).cpu().numpy()
     if end_idx <= start_idx:
         return text
     else:
-        while text[start_idx] != " " and start_idx > 0:
-            start_idx -= 1
-        while end_idx < len(text) and text[end_idx] != " ":
-            end_idx += 1
-        return text[start_idx:end_idx]
+        return text[start_idx : end_idx + 1]
+        # while text[start_idx] != " " and start_idx > 0:
+        # start_idx -= 1
+        # while end_idx < len(text) and text[end_idx] != " ":
+        # end_idx += 1
+        # return text[start_idx:end_idx]
 
 
 #%% metrics
@@ -541,10 +543,8 @@ lr = 4e-3
 optimizer = optim.AdamW(model.parameters(), lr=lr)
 criterion = CrossEntropyLoss()
 train_loader = DataLoader(dataset, batch_size=16)
+#%%
 train(model, optimizer, criterion, train_loader, log_dir=None)
 evaluate(model, criterion, train_loader)
 #%%
 models = cross_validate(TweetSentimentCNN, dataset)
-
-# %%
-optim.lr_scheduler
