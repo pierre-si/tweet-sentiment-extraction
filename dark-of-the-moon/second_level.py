@@ -282,23 +282,29 @@ class ConvBlock(nn.Module):
 
 
 class TweetSentimentCNN(nn.Module):
-    def __init__(self, n_models, n_tokens, dim=16):
+    def __init__(self, n_models, n_tokens, emb_dim=16, cnn_dim=16):
         super().__init__()
 
-        self.prob_conv = ConvBlock(2 * n_models, dim, kernel_size=3)
+        self.prob_conv = ConvBlock(2 * n_models, emb_dim, kernel_size=3)
         self.char_emb = nn.Embedding(
-            num_embeddings=n_tokens, embedding_dim=dim, padding_idx=0
+            num_embeddings=n_tokens, embedding_dim=emb_dim, padding_idx=0
         )
         self.sentiment_emb = nn.Embedding(
-            num_embeddings=3, embedding_dim=dim, padding_idx=-1
+            num_embeddings=3, embedding_dim=emb_dim, padding_idx=-1
         )  # there is no padding. 0 is used for a sentiment.
 
         convs = []
-        for i in range(4):
-            convs.append(ConvBlock(3 * dim, 3 * dim, kernel_size=3))
+        convs.append(ConvBlock(3 * emb_dim, cnn_dim, kernel_size=3))
+        for i in range(1, 4):
+            convs.append(
+                ConvBlock(cnn_dim * (2 ** (i - 1)), cnn_dim * (2 ** i), kernel_size=3)
+            )
         self.convs = nn.Sequential(*convs)
 
-        self.lin = nn.Linear(3 * dim, 2)  # embedding wise linear.
+        # embedding wise linear.
+        self.lin = nn.Sequential(
+            nn.Linear(cnn_dim * (2 ** i), cnn_dim), nn.ReLU(), nn.Linear(cnn_dim, 2)
+        )
 
     def forward(self, start_probabilities, end_probabilities, tokens, sentiment):
         L = start_probabilities.size()[1]
@@ -469,7 +475,7 @@ def cross_validate(model, dataset, epochs=10, n_splits=5):
         train_loader = DataLoader(train_dataset, batch_size=128)
         val_loader = DataLoader(val_dataset, batch_size=512)
 
-        m = model(n_models, ids.max().item() + 1).to(device)
+        m = model(n_models, ids.max().item() + 1, cnn_dim=32).to(device)
         lr = 4e-3
         optimizer = optim.AdamW(m.parameters(), lr=lr)
         opt = SWA(optimizer, swa_start=5, swa_freq=50, swa_lr=None)
