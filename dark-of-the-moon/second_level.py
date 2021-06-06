@@ -62,6 +62,8 @@ PKL_PATH = "../input/tweet-char-lvl-preds/"
 MODELS = [
     ("bert-base-uncased-", "theo"),
     ("bert-wwm-neutral-", "theo"),
+    ("distilbert-base-uncased-distilled-squad-", "theo"),
+    ("albert-large-v2-squad-", "theo"),
     ("roberta-", "hk"),
     ("distil_", "hk"),
     ("large_", "hk"),
