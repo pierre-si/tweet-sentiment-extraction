@@ -282,7 +282,7 @@ class ConvBlock(nn.Module):
 
 
 class TweetSentimentCNN(nn.Module):
-    def __init__(self, n_models, n_tokens, emb_dim=16, cnn_dim=16):
+    def __init__(self, n_models, n_tokens, emb_dim=16, cnn_dim=16, dropout=0.3):
         super().__init__()
 
         self.prob_conv = ConvBlock(2 * n_models, emb_dim, kernel_size=3)
@@ -306,6 +306,8 @@ class TweetSentimentCNN(nn.Module):
             nn.Linear(cnn_dim * (2 ** i), cnn_dim), nn.ReLU(), nn.Linear(cnn_dim, 2)
         )
 
+        self.dropout = nn.Dropout(p=dropout)
+
     def forward(self, start_probabilities, end_probabilities, tokens, sentiment):
         L = start_probabilities.size()[1]
         prob = torch.cat((start_probabilities, end_probabilities), -1).transpose(1, 2)
@@ -314,6 +316,7 @@ class TweetSentimentCNN(nn.Module):
         sent = self.sentiment_emb(sentiment).unsqueeze(2).repeat((1, 1, L))
         x = torch.cat((prob, tokens.transpose(1, 2), sent), dim=1)
         x = self.convs(x)  # N×C×L
+        x = self.dropout(x)
         x = self.lin(x.transpose(1, 2))  # N×L×2
         return x
 
