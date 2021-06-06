@@ -1,4 +1,24 @@
 # 2nd level models of the winning team (character level models)
+# input:
+# 1. unprocessed (not cleaned) sentences embedded at character level
+# 2. sentiment
+# 3. probabilities (transformers' outputs using cleaned text as input)
+# training process:
+# Adam optimizer
+# Linear learning rate, no warmup
+# smoothed cross entropy loss
+# multi sample dropout
+# 5 epochs or 5 + 5 with Stochastic Weighted Average (average of the model weights during the last 5 epochs)
+# Pseudo labeling?
+# TODO: CNN and eventually Wavenet.
+# TODO: try to predict if tokens belong to the excerpt or not instead of predicting the probability to be the first and to be the last.
+#
+# ypred_start = [0.05, 0.04, 0.04, 0.57, 0.12, …]
+# y_start = […, 0, 1, 0, …]
+# y_end = […, 0, 1, 0, …]
+#
+# First level models CV Jaccard ≃ .713
+# Second level models CV Jaccard ≃ .736
 #%%
 from pathlib import Path
 from copy import deepcopy
@@ -191,28 +211,6 @@ def generate_targets(texts, selected_texts, seq_length):
     return y, y_combined, y_start, y_end
 
 
-#%%
-"""Second-level models
-input:
-1. unprocessed (not cleaned) sentences embedded at character level
-2. sentiment
-3. probabilities (transformers' outputs using cleaned text as input)
-training process:
-Adam optimizer
-Linear learning rate, no warmup
-smoothed cross entropy loss
-multi sample dropout
-5 epochs or 5 + 5 with Stochastic Weighted Average (average of the model weights during the last 5 epochs)
-Pseudo labeling?
-TODO: CNN and eventually Wavenet.
-TODO: try to predict if tokens belong to the excerpt or not instead of predicting the probability to be the first and to be the last.
-
-ypred_start = [0.05, 0.04, 0.04, 0.57, 0.12, …]
-y_start = […, 0, 1, 0, …]
-y_end = […, 0, 1, 0, …]
-
-Objectif: Jaccard score ≃ .73
-"""
 #%% dataset
 class TweetSentimentDataset(Dataset):
     def __init__(
@@ -252,7 +250,6 @@ class TweetSentimentDataset(Dataset):
             "text": self.texts[idx],
             "selected_text": self.selected_texts[idx],
         }
-        # return torch.cat((self.sentiments[idx], self.start_probabilities[idx], self.end_probabilities[idx], self.characters[idx])), self.targets[idx]
 
 
 # # if i ever want to do dynamic padding. (do not forget to do uniform size batching ie sorting by seq_len and to not pad characters and targets before giving it to the dataset)
@@ -357,7 +354,7 @@ def words_jaccard(str1, str2):
     return float(len(c)) / (len(a) + len(b) - len(c))
 
 
-def evaluate(model, dataloader, criterion):
+def evaluate(model, criterion, dataloader):
     model.eval()
     losses = []
     jaccards = []
@@ -395,16 +392,14 @@ def evaluate(model, dataloader, criterion):
 # %%
 def train(
     model,
+    optimizer,
+    criterion,
     train_loader,
     val_loader=None,
     epochs=10,
     eval_steps=100,
     log_dir="tensorboard",
 ):
-    lr = 4e-4
-    optimizer = optim.AdamW(model.parameters(), lr=lr)
-    # criterion = CrossEntropyLoss()
-    criterion = LabelSmoothingCrossEntropy(eps=0.1)
 
     if log_dir is not None:
         writer = SummaryWriter(log_dir)
@@ -427,7 +422,7 @@ def train(
 
             step += 1
             if step % eval_steps == 0:
-                train_loss, train_jaccard = evaluate(model, train_loader, criterion)
+                train_loss, train_jaccard = evaluate(model, criterion, train_loader)
                 print("Step", step, end="\n")
                 print("Train loss:", "{:.3f}".format(train_loss), end=" ")
                 print("Train jaccard:", "{:.3f}".format(train_jaccard), end="\n")
@@ -435,7 +430,7 @@ def train(
                     writer.add_scalar("train/loss", train_loss, step)
                     writer.add_scalar("train/jaccard", train_jaccard, step)
                 if val_loader is not None:
-                    val_loss, val_jaccard = evaluate(model, val_loader, criterion)
+                    val_loss, val_jaccard = evaluate(model, criterion, val_loader)
                     print("Valid loss:", "{:.3f}".format(val_loss), end=" ")
                     print("Valid jaccard:", "{:.3f}".format(val_jaccard), end="\n")
                     if log_dir is not None:
@@ -452,27 +447,40 @@ def cross_validate(model, dataset, epochs=10, n_splits=5):
     n_samples = len(dataset)
 
     models = []
+    val_losses = []
+    val_jaccard_scores = []
     # stratify based on sentiment.
+    # criterion = CrossEntropyLoss()
+    criterion = LabelSmoothingCrossEntropy(eps=0.1)
     for i, (train_idx, test_idx) in enumerate(
         folds.split(np.zeros(n_samples), dataset.sentiments)
     ):
         print("Fold", i)
         train_dataset = Subset(dataset, train_idx)
         val_dataset = Subset(dataset, test_idx)
-        train_loader = DataLoader(train_dataset, batch_size=16)
-        val_loader = DataLoader(val_dataset, batch_size=16)
+        train_loader = DataLoader(train_dataset, batch_size=64)
+        val_loader = DataLoader(val_dataset, batch_size=256)
 
         m = model(n_models, ids.max().item() + 1).to(device)
+        lr = 4e-3
+        optimizer = optim.AdamW(m.parameters(), lr=lr)
         train(
             m,
+            optimizer,
+            criterion,
             train_loader,
             val_loader,
             epochs=epochs,
-            eval_steps=100,
+            eval_steps=50,
             log_dir=Path("tensorboard") / ("fold" + str(i)),
         )
+        val_loss, val_jaccard = evaluate(m, criterion, val_loader)
+        val_losses.append(val_loss)
+        val_jaccard_scores.append(val_jaccard)
         models.append(deepcopy(m))
 
+    print("Average loss:", mean(val_losses))
+    print("Average jaccard:", mean(val_jaccard_scores))
     return models
 
 
@@ -502,12 +510,13 @@ dataset = TweetSentimentDataset(
     df_train["selected_text"],
 )
 #%%
-train_loader = DataLoader(dataset, batch_size=16)
 model = TweetSentimentCNN(n_models, ids.max().item() + 1).to(device)
-
-train(model, train_loader, log_dir=None)
+lr = 4e-3
+optimizer = optim.AdamW(model.parameters(), lr=lr)
 criterion = CrossEntropyLoss()
-evaluate(model, train_loader, criterion)
+train_loader = DataLoader(dataset, batch_size=16)
+train(model, optimizer, criterion, train_loader, log_dir=None)
+evaluate(model, criterion, train_loader)
 #%%
 models = cross_validate(TweetSentimentCNN, dataset)
 
