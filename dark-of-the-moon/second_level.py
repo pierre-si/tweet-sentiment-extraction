@@ -37,6 +37,7 @@ from torch.nn import CrossEntropyLoss
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, Subset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
+from torchcontrib.optim import SWA
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 # %%
@@ -260,14 +261,31 @@ class TweetSentimentDataset(Dataset):
 #     end_prob = pad_sequence(end_prob, batch_first=True)
 
 #%% model
+class ConvBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size):
+        super().__init__()
+
+        self.conv = nn.Conv1d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            padding=kernel_size // 2,
+        )
+        self.bn = nn.BatchNorm1d(num_features=out_channels)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.bn(x)
+        x = self.relu(x)
+        return x
+
+
 class TweetSentimentCNN(nn.Module):
     def __init__(self, n_models, n_tokens, dim=16):
         super().__init__()
-        self.prob_conv = nn.Conv1d(
-            in_channels=2 * n_models, out_channels=dim, kernel_size=3, padding=3 // 2
-        )
-        self.prob_norm = nn.BatchNorm1d(num_features=dim)
 
+        self.prob_conv = ConvBlock(2 * n_models, dim, kernel_size=3)
         self.char_emb = nn.Embedding(
             num_embeddings=n_tokens, embedding_dim=dim, padding_idx=0
         )
@@ -277,25 +295,15 @@ class TweetSentimentCNN(nn.Module):
 
         convs = []
         for i in range(4):
-            convs.append(
-                nn.Conv1d(
-                    in_channels=3 * dim,
-                    out_channels=3 * dim,
-                    kernel_size=3,
-                    padding=3 // 2,
-                )
-            )
-            convs.append(nn.BatchNorm1d(num_features=3 * dim))
+            convs.append(ConvBlock(3 * dim, 3 * dim, kernel_size=3))
         self.convs = nn.Sequential(*convs)
 
         self.lin = nn.Linear(3 * dim, 2)  # embedding wise linear.
-        # self.softmax = nn.Softmax(dim=1)
 
     def forward(self, start_probabilities, end_probabilities, tokens, sentiment):
         L = start_probabilities.size()[1]
         prob = torch.cat((start_probabilities, end_probabilities), -1).transpose(1, 2)
         prob = self.prob_conv(prob)
-        prob = self.prob_norm(prob)
         tokens = self.char_emb(tokens)
         sent = self.sentiment_emb(sentiment).unsqueeze(2).repeat((1, 1, L))
         x = torch.cat((prob, tokens.transpose(1, 2), sent), dim=1)
@@ -458,15 +466,16 @@ def cross_validate(model, dataset, epochs=10, n_splits=5):
         print("Fold", i)
         train_dataset = Subset(dataset, train_idx)
         val_dataset = Subset(dataset, test_idx)
-        train_loader = DataLoader(train_dataset, batch_size=64)
-        val_loader = DataLoader(val_dataset, batch_size=256)
+        train_loader = DataLoader(train_dataset, batch_size=128)
+        val_loader = DataLoader(val_dataset, batch_size=512)
 
         m = model(n_models, ids.max().item() + 1).to(device)
         lr = 4e-3
         optimizer = optim.AdamW(m.parameters(), lr=lr)
+        opt = SWA(optimizer, swa_start=5, swa_freq=50, swa_lr=None)
         train(
             m,
-            optimizer,
+            opt,
             criterion,
             train_loader,
             val_loader,
@@ -474,6 +483,7 @@ def cross_validate(model, dataset, epochs=10, n_splits=5):
             eval_steps=50,
             log_dir=Path("tensorboard") / ("fold" + str(i)),
         )
+        opt.swap_swa_sgd()
         val_loss, val_jaccard = evaluate(m, criterion, val_loader)
         val_losses.append(val_loss)
         val_jaccard_scores.append(val_jaccard)
