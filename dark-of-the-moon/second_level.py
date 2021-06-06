@@ -1,20 +1,4 @@
 # 2nd level models of the winning team (character level models)
-# Inputs:
-# 1. unprocessed (not cleaned) sentences embedded at character level
-# 2. sentiment
-# 3. probabilities (transformers' outputs using cleaned text as input)
-# training process:
-# -[x] Adam optimizer
-# -[ ] Linear learning rate, no warmup
-# -[x] smoothed cross entropy loss
-# -[x] multi sample dropout
-# -[x] Stochastic Weighted Average
-# -[ ] Pseudo labeling?
-# -[x] CNN
-# -[ ] Wavenet.
-#
-# First level models CV Jaccard ≃ .713
-# Second level models CV Jaccard ≃ .736
 #%%
 from pathlib import Path
 from copy import deepcopy
@@ -36,7 +20,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torchcontrib.optim import SWA
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-# %%
+# %% code by the winning team
 def seed_everything(seed):
     """
     Seeds basic parameters for reproductibility of results
@@ -140,10 +124,7 @@ char_pred_oof_end = [
     for i in range(len(df_train))
 ]
 
-# %%
 preds = {
-    #    'test_start': np.array(char_pred_test_start),
-    #    'test_end': np.array(char_pred_test_end),
     "oof_start": np.array(char_pred_oof_start),
     "oof_end": np.array(char_pred_oof_end),
 }
@@ -151,8 +132,8 @@ preds = {
 model_names = [a + " : " + m for m, a in MODELS]
 combs = [model_names]
 
-print("Using models : ", combs)
-# %% Character level tokenizer from https://huggingface.co/google/reformer-enwik8
+# %% reimplementation starts here
+# Character level tokenizer from https://huggingface.co/google/reformer-enwik8
 # Encoding
 def encode(list_of_strings, pad_token_id=0, max_length=None):
     if max_length is None:
@@ -251,7 +232,7 @@ class TweetSentimentDataset(Dataset):
         }
 
 
-# # if i ever want to do dynamic padding. (do not forget to do uniform size batching ie sorting by seq_len and to not pad characters and targets before giving it to the dataset)
+# # for dynamic padding. (do not forget uniform size batching ie sorting by seq_len and to not pad characters and targets before giving it to the dataset)
 # def tweet_collate_fn(batch):
 #     start_prob = [torch.tensor(p) for p in batch['start_probabilities'])]
 #     start_prob = pad_sequence(start_prob, batch_first=True)
@@ -547,4 +528,4 @@ train_loader = DataLoader(dataset, batch_size=16)
 train(model, optimizer, criterion, train_loader, log_dir=None)
 evaluate(model, criterion, train_loader)
 #%%
-models = cross_validate(TweetSentimentCNN, dataset)
+models = cross_validate(TweetSentimentCNN, dataset, n_splits=10)
