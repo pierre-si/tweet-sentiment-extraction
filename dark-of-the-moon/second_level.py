@@ -1,21 +1,17 @@
 # 2nd level models of the winning team (character level models)
-# input:
+# Inputs:
 # 1. unprocessed (not cleaned) sentences embedded at character level
 # 2. sentiment
 # 3. probabilities (transformers' outputs using cleaned text as input)
 # training process:
-# Adam optimizer
-# Linear learning rate, no warmup
-# smoothed cross entropy loss
-# multi sample dropout
-# 5 epochs or 5 + 5 with Stochastic Weighted Average (average of the model weights during the last 5 epochs)
-# Pseudo labeling?
-# TODO: CNN and eventually Wavenet.
-# TODO: try to predict if tokens belong to the excerpt or not instead of predicting the probability to be the first and to be the last.
-#
-# ypred_start = [0.05, 0.04, 0.04, 0.57, 0.12, …]
-# y_start = […, 0, 1, 0, …]
-# y_end = […, 0, 1, 0, …]
+# -[x] Adam optimizer
+# -[ ] Linear learning rate, no warmup
+# -[x] smoothed cross entropy loss
+# -[x] multi sample dropout
+# -[x] Stochastic Weighted Average
+# -[ ] Pseudo labeling?
+# -[x] CNN
+# -[ ] Wavenet.
 #
 # First level models CV Jaccard ≃ .713
 # Second level models CV Jaccard ≃ .736
@@ -282,7 +278,9 @@ class ConvBlock(nn.Module):
 
 
 class TweetSentimentCNN(nn.Module):
-    def __init__(self, n_models, n_tokens, emb_dim=16, cnn_dim=16, dropout=0.3):
+    def __init__(
+        self, n_models, n_tokens, emb_dim=16, cnn_dim=16, dropout=0.3, dropout_samples=8
+    ):
         super().__init__()
 
         self.prob_conv = ConvBlock(2 * n_models, emb_dim, kernel_size=3)
@@ -307,6 +305,7 @@ class TweetSentimentCNN(nn.Module):
         )
 
         self.dropout = nn.Dropout(p=dropout)
+        self.dropout_samples = dropout_samples
 
     def forward(self, start_probabilities, end_probabilities, tokens, sentiment):
         L = start_probabilities.size()[1]
@@ -316,8 +315,14 @@ class TweetSentimentCNN(nn.Module):
         sent = self.sentiment_emb(sentiment).unsqueeze(2).repeat((1, 1, L))
         x = torch.cat((prob, tokens.transpose(1, 2), sent), dim=1)
         x = self.convs(x)  # N×C×L
-        x = self.dropout(x)
-        x = self.lin(x.transpose(1, 2))  # N×L×2
+        if self.training:
+            x = torch.stack(
+                [self.dropout(x) for _ in range(self.dropout_samples)], dim=1
+            )  # N×Ds×C×L
+            x = torch.mean(self.lin(x.transpose(2, 3)), dim=1)  # N×L×2
+        else:
+            x = self.dropout(x)
+            x = self.lin(x.transpose(1, 2))  # N×L×2
         return x
 
 
@@ -478,7 +483,7 @@ def cross_validate(model, dataset, epochs=10, n_splits=5):
         train_loader = DataLoader(train_dataset, batch_size=128)
         val_loader = DataLoader(val_dataset, batch_size=512)
 
-        m = model(n_models, ids.max().item() + 1, cnn_dim=32).to(device)
+        m = model(n_models, ids.max().item() + 1, cnn_dim=32, dropout=0.3).to(device)
         lr = 4e-3
         optimizer = optim.AdamW(m.parameters(), lr=lr)
         opt = SWA(optimizer, swa_start=5, swa_freq=50, swa_lr=None)
@@ -540,3 +545,4 @@ evaluate(model, criterion, train_loader)
 models = cross_validate(TweetSentimentCNN, dataset)
 
 # %%
+optim.lr_scheduler
