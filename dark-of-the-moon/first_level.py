@@ -1,5 +1,7 @@
 # 1st level models of the winning team (character level models)
 #%%
+import pickle
+
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import StratifiedKFold, KFold
@@ -29,7 +31,7 @@ def read_tweets(path):
 
 contexts, questions, answers, ids, sentiments = read_tweets(
     "../input/tweet-sentiment-extraction/train.csv"
-)
+)  # 27500 examples
 # %%
 tokenizer = DistilBertTokenizerFast.from_pretrained("distilbert-base-uncased")
 encodings = tokenizer(contexts, questions, truncation=True, padding=True)
@@ -73,58 +75,59 @@ class TweetDataset(torch.utils.data.Dataset):
 dataset = TweetDataset(encodings)
 #%%
 training_args = TrainingArguments(
-    output_dir="./results",  # output directory
-    num_train_epochs=0.1,  # total number of training epochs
-    per_device_train_batch_size=32,  # batch size per device during training
-    per_device_eval_batch_size=128,  # batch size for evaluation
-    warmup_steps=500,  # number of warmup steps for learning rate scheduler
-    weight_decay=0.01,  # strength of weight decay
-    logging_dir="./logs",  # directory for storing logs
-    logging_steps=100,
+    output_dir="./results",
+    num_train_epochs=3,
+    per_device_train_batch_size=32,
+    per_device_eval_batch_size=128,
+    learning_rate=5e-5,
+    warmup_steps=500,
+    weight_decay=0.01,
+    save_strategy="no",
+    evaluation_strategy="steps",
+    logging_dir="./logs",
+    logging_steps=200,
 )
 #%%
 def cross_validate(model_name, training_args, dataset, n_splits=5):
     folds = KFold(n_splits)  # StratifiedKFold(n_splits=n_splits)
     n_samples = len(dataset)
 
-    predictions = []
+    starts = []
+    ends = []
     losses = []
     for i, (train_idx, test_idx) in enumerate(
         folds.split(np.zeros(n_samples))  # , dataset.sentiments)
     ):
-        print("Fold", i)
+        print("\nFold", i)
         train_dataset = Subset(dataset, train_idx)
         val_dataset = Subset(dataset, test_idx)
 
         model = AutoModelForQuestionAnswering.from_pretrained(model_name)
         trainer = Trainer(
-            model=model,  # the instantiated 🤗 Transformers model to be trained
-            args=training_args,  # training arguments, defined above
-            train_dataset=train_dataset,  # training dataset
-            eval_dataset=val_dataset,  # evaluation dataset
+            model=model,
+            args=training_args,
+            train_dataset=train_dataset,
+            eval_dataset=val_dataset,
         )
 
         trainer.train()
 
-        preds, _, metrics = trainer.predict(val_dataset)
-        predictions.append(preds)
+        (start, end), _, metrics = trainer.predict(val_dataset)
+        starts.append(start)
+        ends.append(end)
         losses.append(metrics["test_loss"])
 
-    return predictions, losses
+    start_logits = np.concatenate(starts)
+    end_logits = np.concatenate(ends)
+    return start_logits, end_logits, losses
 
 
 #%%
-predictions, losses = cross_validate("distilbert-base-uncased", training_args, dataset)
-
-#%%
-# train_dataset, val_dataset = random_split(dataset, [int(len(dataset)*.8), int(len(dataset)*.2)])
-model = DistilBertForQuestionAnswering.from_pretrained("distilbert-base-uncased")
-
-trainer = Trainer(
-    model=model,  # the instantiated 🤗 Transformers model to be trained
-    args=training_args,  # training arguments, defined above
-    train_dataset=train_dataset,  # training dataset
-    eval_dataset=val_dataset,  # evaluation dataset
+start_logits, end_logits, losses = cross_validate(
+    "distilbert-base-uncased", training_args, dataset
 )
-
-trainer.train()
+#%%
+with open("distilbert-base-uncased_pred_off_start", "wb") as f:
+    pickle.dump(start_logits, f)
+with open("distilbert-base-uncased_pred_off_end", "wb") as f:
+    pickle.dump(end_logits, f)
