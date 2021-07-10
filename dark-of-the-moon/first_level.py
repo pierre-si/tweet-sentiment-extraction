@@ -11,6 +11,23 @@ from transformers import DistilBertTokenizerFast, AutoModelForQuestionAnswering
 from transformers import Trainer, TrainingArguments
 
 #%%
+loc = os.environ.get("KAGGLE_KERNEL_RUN_TYPE", "Localhost")
+if loc == "Interactive" or loc == "Localhost":
+    conf = {
+        "batch_size": 32,
+        "epochs": 0.1,
+        "eval_steps": 200,
+        "learning_rate": 2e-5,
+    }
+# When it is run after an api push.
+elif loc == "Batch":
+    conf = {
+        "batch_size": 128,
+        "epochs": 3,
+        "eval_steps": 100,
+        "learning_rate": 5e-5,
+    }
+#%%
 def read_tweets(path):
     data = pd.read_csv(path, skip_blank_lines=False)
     data.dropna(0, "any", inplace=True)
@@ -74,20 +91,6 @@ class TweetDataset(torch.utils.data.Dataset):
 
 dataset = TweetDataset(encodings)
 #%%
-training_args = TrainingArguments(
-    output_dir="./results",
-    num_train_epochs=3,
-    per_device_train_batch_size=32,
-    per_device_eval_batch_size=128,
-    learning_rate=5e-5,
-    warmup_steps=500,
-    weight_decay=0.01,
-    save_strategy="no",
-    evaluation_strategy="steps",
-    logging_dir="./logs",
-    logging_steps=200,
-)
-#%%
 def cross_validate(model_name, training_args, dataset, n_splits=5):
     folds = KFold(n_splits)  # StratifiedKFold(n_splits=n_splits)
     n_samples = len(dataset)
@@ -123,11 +126,24 @@ def cross_validate(model_name, training_args, dataset, n_splits=5):
 
 
 #%%
-start_logits, end_logits, losses = cross_validate(
-    "distilbert-base-uncased", training_args, dataset
+training_args = TrainingArguments(
+    output_dir="./results",
+    num_train_epochs=conf["epochs"],
+    per_device_train_batch_size=conf["batch_size"],
+    per_device_eval_batch_size=4 * conf["batch_size"],
+    learning_rate=conf["learning_rate"],
+    warmup_steps=500,
+    weight_decay=0.01,
+    save_strategy="no",
+    evaluation_strategy="steps",
+    logging_dir="./logs",
+    logging_steps=conf["eval_steps"],
 )
+
+model_name = "distilbert-base-uncased"
+start_logits, end_logits, losses = cross_validate(model_name, training_args, dataset)
 #%%
-with open("distilbert-base-uncased_pred_off_start", "wb") as f:
+with open(model_name + "_pred_off_start", "wb") as f:
     pickle.dump(start_logits, f)
-with open("distilbert-base-uncased_pred_off_end", "wb") as f:
+with open(model_name + "_pred_off_end", "wb") as f:
     pickle.dump(end_logits, f)
