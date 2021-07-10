@@ -1,5 +1,6 @@
-# 1st level models of the winning team (character level models)
+# 1st level models of the winning team (token level models)
 #%%
+import os
 import pickle
 
 import pandas as pd
@@ -136,6 +137,7 @@ training_args = TrainingArguments(
     weight_decay=0.01,
     save_strategy="no",
     evaluation_strategy="steps",
+    report_to="tensorboard",
     logging_dir="./logs",
     logging_steps=conf["eval_steps"],
 )

@@ -1,0 +1,13 @@
+{
+  "id": "punderscore/first-level",
+  "title": "first level",
+  "code_file": "first_level.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "true",
+  "enable_internet": "true",
+  "dataset_sources": [],
+  "competition_sources": ["tweet-sentiment-extraction"],
+  "kernel_sources": []
+}
