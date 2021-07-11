@@ -1,6 +1,7 @@
 # 1st level models of the winning team (token level models)
 #%%
 import os
+from pathlib import Path
 import pickle
 from statistics import mean
 
@@ -35,14 +36,15 @@ def read_tweets(path):
     data.dropna(0, "any", inplace=True)
 
     contexts = data["text"].to_list()
+    contexts = [" ".join(context.split()) for context in contexts]
     ids = data["textID"].to_list()
     sentiments = data["sentiment"].to_list()
     questions = ["Sentiment"] * len(contexts)
     answers = [
-        {"text": answer, "answer_start": context.find(answer)}
-        for context, answer in zip(contexts, data["selected_text"].values)
+        {"text": " ".join(answer.split())} for answer in data["selected_text"].values
     ]
-    for answer in answers:
+    for answer, context in zip(answers, contexts):
+        answer["answer_start"] = context.find(answer["text"])
         answer["answer_end"] = answer["answer_start"] + len(answer["text"])
 
     return contexts, questions, answers, ids, sentiments
@@ -54,9 +56,9 @@ contexts, questions, answers, ids, sentiments = read_tweets(
 # %%
 model_name = "distilbert-base-uncased"
 tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
-encodings = tokenizer(
-    contexts, questions, truncation=True, padding=True, max_length=142
-)
+# the length of the tokenized sentences (max: 112) does not seem to exceed the model’s default max length.
+encodings = tokenizer(contexts, questions, padding=True)
+# encodings = tokenizer(contexts, questions, padding=False)
 # %%
 def add_token_positions(encodings, answers):
     start_positions = []
@@ -154,14 +156,13 @@ with open(model_name + "_pred_off_start", "wb") as f:
 with open(model_name + "_pred_off_end", "wb") as f:
     pickle.dump(end_logits, f)
 #%%
-# with open(
-#     "../output/distilbert-base-uncased/distilbert-base-uncased_pred_off_start", "rb"
-# ) as f:
-#     start_logits = pickle.load(f)
-# with open(
-#     "../output/distilbert-base-uncased/distilbert-base-uncased_pred_off_end", "rb"
-# ) as f:
-#     end_logits = pickle.load(f)
+# preds_path = Path("../output/distilbert-base-uncased_pad112")
+preds_path = Path("../output/distilbert-base_uncased_pad112_smoothing0,1")
+# preds_path = Path("../output/distilbert-base_uncased_pad112_smoothing0,1_5epochs")
+with open(preds_path / "distilbert-base-uncased_pred_off_start", "rb") as f:
+    start_logits = pickle.load(f)
+with open(preds_path / "distilbert-base-uncased_pred_off_end", "rb") as f:
+    end_logits = pickle.load(f)
 logits = np.stack((start_logits, end_logits), axis=2)
 # %%
 def logits_to_string(logits, encoding, text):
@@ -171,12 +172,13 @@ def logits_to_string(logits, encoding, text):
     # TODO option to truncate the end_logits to [start_index:] to force end_index to be > start_index
 
     start_idx, end_idx = logits.argmax(axis=0)
-    if end_idx <= start_idx:
-        return text
+    if end_idx < start_idx:
+        return text, 1
     else:
         # tokenizer.decode adds extra spaces…
         # return tokenizer.decode(encoding.ids[start_idx:end_idx+1])
-        return text[encoding.offsets[start_idx][0] : encoding.offsets[end_idx][1]]
+        # offset[1] is the index of the character after the last on in the token
+        return text[encoding.offsets[start_idx][0] : encoding.offsets[end_idx][1]], 0
 
 
 def words_jaccard(str1, str2):
@@ -187,19 +189,30 @@ def words_jaccard(str1, str2):
 
 
 #%%
-predictions = [
-    logits_to_string(logits[i], encodings[i], contexts[i]) for i in range(len(logits))
-]
+errors = 0
+predictions = []
+for i in range(len(logits)):
+    pred, whole = logits_to_string(logits[i], encodings[i], contexts[i])
+    predictions.append(pred)
+    errors += whole
+print(errors)
+# 99,96% of the predictions have end_idx >= start_idx
+#%%
+# predictions = [
+#     logits_to_string(logits[i], encodings[i], contexts[i]) for i in range(len(logits))
+# ]
 jaccards = [
     words_jaccard(prediction, answer["text"])
     for prediction, answer in zip(predictions, answers)
 ]
-# print(mean(jaccards))
+print(mean(jaccards))
+#%%
 # baselines = [
 #     words_jaccard(context, answer["text"])
 #     for context, answer in zip(contexts, answers)
 # ]
 # print(mean(baselines)) 0.589
 #%%
-# for idx in range(85, 105):
-#     print(jaccards[idx], predictions[idx], "||",  answers[idx]["text"])
+# for idx in range(70):
+#     if jaccards[idx] < .8:
+#         print(idx, jaccards[idx], predictions[idx], "||",  answers[idx]["text"], logits[idx].argmax(0))
