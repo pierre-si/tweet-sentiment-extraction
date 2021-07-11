@@ -2,6 +2,7 @@
 #%%
 import os
 import pickle
+from statistics import mean
 
 import pandas as pd
 import numpy as np
@@ -38,7 +39,7 @@ def read_tweets(path):
     sentiments = data["sentiment"].to_list()
     questions = ["Sentiment"] * len(contexts)
     answers = [
-        {"text": context, "answer_start": context.find(answer)}
+        {"text": answer, "answer_start": context.find(answer)}
         for context, answer in zip(contexts, data["selected_text"].values)
     ]
     for answer in answers:
@@ -52,7 +53,9 @@ contexts, questions, answers, ids, sentiments = read_tweets(
 )  # 27500 examples
 # %%
 tokenizer = DistilBertTokenizerFast.from_pretrained("distilbert-base-uncased")
-encodings = tokenizer(contexts, questions, truncation=True, padding=True)
+encodings = tokenizer(
+    contexts, questions, truncation=True, padding=True, max_length=142
+)
 # %%
 def add_token_positions(encodings, answers):
     start_positions = []
@@ -149,3 +152,45 @@ with open(model_name + "_pred_off_start", "wb") as f:
     pickle.dump(start_logits, f)
 with open(model_name + "_pred_off_end", "wb") as f:
     pickle.dump(end_logits, f)
+#%%
+with open(
+    "../output/distilbert-base-uncased/distilbert-base-uncased_pred_off_start", "rb"
+) as f:
+    start_logits = pickle.load(f)
+with open(
+    "../output/distilbert-base-uncased/distilbert-base-uncased_pred_off_start", "rb"
+) as f:
+    end_logits = pickle.load(f)
+logits = np.stack((start_logits, end_logits), axis=2)
+# %%
+def logits_to_string(logits, tokens, text):
+    """Transforms logit predictions to a text selection
+    Assumes that logits[i] corresponds to text[i].
+    """
+    # TODO option to truncate the end_logits to [start_index:] to force end_index to be > start_index
+
+    start_idx, end_idx = logits.argmax(axis=0)
+    if end_idx <= start_idx:
+        return text
+    else:
+        print("diff!")
+        return " ".join(tokens[start_idx : end_idx + 1])
+
+
+def words_jaccard(str1, str2):
+    a = set(str1.lower().split())
+    b = set(str2.lower().split())
+    c = a.intersection(b)
+    return float(len(c)) / (len(a) + len(b) - len(c))
+
+
+#%%
+predictions = [
+    logits_to_string(logits[i], encodings[i].tokens, contexts[i])
+    for i in range(len(logits))
+]
+jaccards = [
+    words_jaccard(prediction, answer["text"])
+    for prediction, answer in zip(predictions, answers)
+]
+print(mean(jaccards))
