@@ -9,7 +9,7 @@ import numpy as np
 from sklearn.model_selection import StratifiedKFold, KFold
 import torch
 from torch.utils.data import random_split, Subset
-from transformers import DistilBertTokenizerFast, AutoModelForQuestionAnswering
+from transformers import AutoTokenizer, AutoModelForQuestionAnswering
 from transformers import Trainer, TrainingArguments
 
 #%%
@@ -52,7 +52,8 @@ contexts, questions, answers, ids, sentiments = read_tweets(
     "../input/tweet-sentiment-extraction/train.csv"
 )  # 27500 examples
 # %%
-tokenizer = DistilBertTokenizerFast.from_pretrained("distilbert-base-uncased")
+model_name = "distilbert-base-uncased"
+tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
 encodings = tokenizer(
     contexts, questions, truncation=True, padding=True, max_length=142
 )
@@ -138,6 +139,7 @@ training_args = TrainingArguments(
     learning_rate=conf["learning_rate"],
     warmup_steps=500,
     weight_decay=0.01,
+    label_smoothing_factor=0.1,
     save_strategy="no",
     evaluation_strategy="steps",
     report_to="tensorboard",
@@ -145,7 +147,6 @@ training_args = TrainingArguments(
     logging_steps=conf["eval_steps"],
 )
 
-model_name = "distilbert-base-uncased"
 start_logits, end_logits, losses = cross_validate(model_name, training_args, dataset)
 #%%
 with open(model_name + "_pred_off_start", "wb") as f:
@@ -153,17 +154,17 @@ with open(model_name + "_pred_off_start", "wb") as f:
 with open(model_name + "_pred_off_end", "wb") as f:
     pickle.dump(end_logits, f)
 #%%
-with open(
-    "../output/distilbert-base-uncased/distilbert-base-uncased_pred_off_start", "rb"
-) as f:
-    start_logits = pickle.load(f)
-with open(
-    "../output/distilbert-base-uncased/distilbert-base-uncased_pred_off_start", "rb"
-) as f:
-    end_logits = pickle.load(f)
+# with open(
+#     "../output/distilbert-base-uncased/distilbert-base-uncased_pred_off_start", "rb"
+# ) as f:
+#     start_logits = pickle.load(f)
+# with open(
+#     "../output/distilbert-base-uncased/distilbert-base-uncased_pred_off_end", "rb"
+# ) as f:
+#     end_logits = pickle.load(f)
 logits = np.stack((start_logits, end_logits), axis=2)
 # %%
-def logits_to_string(logits, tokens, text):
+def logits_to_string(logits, encoding, text):
     """Transforms logit predictions to a text selection
     Assumes that logits[i] corresponds to text[i].
     """
@@ -173,8 +174,9 @@ def logits_to_string(logits, tokens, text):
     if end_idx <= start_idx:
         return text
     else:
-        print("diff!")
-        return " ".join(tokens[start_idx : end_idx + 1])
+        # tokenizer.decode adds extra spaces…
+        # return tokenizer.decode(encoding.ids[start_idx:end_idx+1])
+        return text[encoding.offsets[start_idx][0] : encoding.offsets[end_idx][1]]
 
 
 def words_jaccard(str1, str2):
@@ -186,11 +188,18 @@ def words_jaccard(str1, str2):
 
 #%%
 predictions = [
-    logits_to_string(logits[i], encodings[i].tokens, contexts[i])
-    for i in range(len(logits))
+    logits_to_string(logits[i], encodings[i], contexts[i]) for i in range(len(logits))
 ]
 jaccards = [
     words_jaccard(prediction, answer["text"])
     for prediction, answer in zip(predictions, answers)
 ]
-print(mean(jaccards))
+# print(mean(jaccards))
+# baselines = [
+#     words_jaccard(context, answer["text"])
+#     for context, answer in zip(contexts, answers)
+# ]
+# print(mean(baselines)) 0.589
+#%%
+# for idx in range(85, 105):
+#     print(jaccards[idx], predictions[idx], "||",  answers[idx]["text"])
