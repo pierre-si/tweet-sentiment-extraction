@@ -25,9 +25,9 @@ if loc == "Interactive" or loc == "Localhost":
 # When it is run after an api push.
 elif loc == "Batch":
     conf = {
-        "batch_size": 128,
+        "batch_size": 32,
         "epochs": 3,
-        "eval_steps": 100,
+        "eval_steps": 400,
         "learning_rate": 5e-5,
     }
 #%%
@@ -36,12 +36,14 @@ def read_tweets(path):
     data.dropna(0, "any", inplace=True)
 
     contexts = data["text"].to_list()
-    contexts = [" ".join(context.split()) for context in contexts]
+    # contexts = [" ".join(context.split()) for context in contexts]
     ids = data["textID"].to_list()
     sentiments = data["sentiment"].to_list()
     questions = ["Sentiment"] * len(contexts)
     answers = [
-        {"text": " ".join(answer.split())} for answer in data["selected_text"].values
+        {"text": answer}
+        for answer in data["selected_text"].values
+        # {"text": " ".join(answer.split())} for answer in data["selected_text"].values
     ]
     for answer, context in zip(answers, contexts):
         answer["answer_start"] = context.find(answer["text"])
@@ -53,6 +55,13 @@ def read_tweets(path):
 contexts, questions, answers, ids, sentiments = read_tweets(
     "../input/tweet-sentiment-extraction/train.csv"
 )  # 27500 examples
+#%%
+# length = 40
+# contexts = contexts[:length]
+# questions = questions[:length]
+# answers = answers[:length]
+# ids = ids[:length]
+# sentiments = sentiments[:length]
 # %%
 model_name = "distilbert-base-uncased"
 tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
@@ -127,6 +136,8 @@ def cross_validate(model_name, training_args, dataset, n_splits=5):
         ends.append(end)
         losses.append(metrics["test_loss"])
 
+        # train_loader = DataLoader(train_dataset, batch_size=training_args.per_device_train_batch_size, shuffle=True)
+
     start_logits = np.concatenate(starts)
     end_logits = np.concatenate(ends)
     return start_logits, end_logits, losses
@@ -139,8 +150,9 @@ training_args = TrainingArguments(
     per_device_train_batch_size=conf["batch_size"],
     per_device_eval_batch_size=4 * conf["batch_size"],
     learning_rate=conf["learning_rate"],
-    warmup_steps=500,
-    weight_decay=0.01,
+    lr_scheduler_type="constant",
+    # warmup_steps=500,
+    weight_decay=0.001,
     label_smoothing_factor=0.1,
     save_strategy="no",
     evaluation_strategy="steps",
@@ -157,12 +169,11 @@ with open(model_name + "_pred_off_end", "wb") as f:
     pickle.dump(end_logits, f)
 #%%
 # preds_path = Path("../output/distilbert-base-uncased_pad112")
-preds_path = Path("../output/distilbert-base_uncased_pad112_smoothing0,1")
-# preds_path = Path("../output/distilbert-base_uncased_pad112_smoothing0,1_5epochs")
-with open(preds_path / "distilbert-base-uncased_pred_off_start", "rb") as f:
-    start_logits = pickle.load(f)
-with open(preds_path / "distilbert-base-uncased_pred_off_end", "rb") as f:
-    end_logits = pickle.load(f)
+
+# with open(preds_path / "distilbert-base-uncased_pred_off_start", "rb") as f:
+#     start_logits = pickle.load(f)
+# with open(preds_path / "distilbert-base-uncased_pred_off_end", "rb") as f:
+#     end_logits = pickle.load(f)
 logits = np.stack((start_logits, end_logits), axis=2)
 # %%
 def logits_to_string(logits, encoding, text):
@@ -189,18 +200,45 @@ def words_jaccard(str1, str2):
 
 
 #%%
-errors = 0
-predictions = []
-for i in range(len(logits)):
-    pred, whole = logits_to_string(logits[i], encodings[i], contexts[i])
-    predictions.append(pred)
-    errors += whole
-print(errors)
+def logits_to_string_bert(logits, encoding, text):
+    """Same as above but following the procedure from the BERT paper"""
+
+    start_logits = logits[:, 0]
+    end_logits = logits[:, 1]
+
+    best_start_idx = len(start_logits) - 1
+    best_end_idx = len(start_logits) - 1
+    best_span_score = start_logits[best_start_idx] + end_logits[best_end_idx]
+    # evaluates all spans starting from the end of the sequence
+    for start_idx in range(len(start_logits) - 1, 0, -1):
+        # best_end_idx: idx greater than or equal to start_idx with the biggest score
+        if end_logits[start_idx] > end_logits[best_end_idx]:
+            best_end_idx = start_idx
+        # score of the best span starting from start_idx
+        span_score = start_logits[start_idx] + end_logits[best_end_idx]
+        # score of the best span starting from or after start_idx
+        if span_score >= best_span_score:
+            best_span_score = span_score
+            best_start_idx = start_idx
+
+    return text[encoding.offsets[best_start_idx][0] : encoding.offsets[best_end_idx][1]]
+
+
+#%%
+# errors = 0
+# predictions = []
+# for i in range(len(logits)):
+#     pred, whole = logits_to_string(logits[i], encodings[i], contexts[i])
+#     predictions.append(pred)
+#     errors += whole
+# print(errors)
 # 99,96% of the predictions have end_idx >= start_idx
 #%%
-# predictions = [
-#     logits_to_string(logits[i], encodings[i], contexts[i]) for i in range(len(logits))
-# ]
+predictions = [
+    logits_to_string_bert(logits[i], encodings[i], contexts[i])
+    for i in range(len(logits))
+]
+#%%
 jaccards = [
     words_jaccard(prediction, answer["text"])
     for prediction, answer in zip(predictions, answers)
@@ -216,3 +254,4 @@ print(mean(jaccards))
 # for idx in range(70):
 #     if jaccards[idx] < .8:
 #         print(idx, jaccards[idx], predictions[idx], "||",  answers[idx]["text"], logits[idx].argmax(0))
+#         print(logits[idx])
