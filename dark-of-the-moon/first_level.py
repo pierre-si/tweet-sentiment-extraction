@@ -25,10 +25,10 @@ if loc == "Interactive" or loc == "Localhost":
 # When it is run after an api push.
 elif loc == "Batch":
     conf = {
-        "batch_size": 32,
+        "batch_size": 128,
         "epochs": 3,
-        "eval_steps": 400,
-        "learning_rate": 5e-5,
+        "eval_steps": 100,
+        "learning_rate": 1e-4,
     }
 #%%
 def read_tweets(path):
@@ -38,8 +38,7 @@ def read_tweets(path):
     contexts = data["text"].to_list()
     # contexts = [" ".join(context.split()) for context in contexts]
     ids = data["textID"].to_list()
-    sentiments = data["sentiment"].to_list()
-    questions = ["Sentiment"] * len(contexts)
+    questions = data["sentiment"].to_list()
     answers = [
         {"text": answer}
         for answer in data["selected_text"].values
@@ -49,10 +48,10 @@ def read_tweets(path):
         answer["answer_start"] = context.find(answer["text"])
         answer["answer_end"] = answer["answer_start"] + len(answer["text"])
 
-    return contexts, questions, answers, ids, sentiments
+    return contexts, questions, answers, ids
 
 
-contexts, questions, answers, ids, sentiments = read_tweets(
+contexts, questions, answers, ids = read_tweets(
     "../input/tweet-sentiment-extraction/train.csv"
 )  # 27500 examples
 #%%
@@ -61,7 +60,6 @@ contexts, questions, answers, ids, sentiments = read_tweets(
 # questions = questions[:length]
 # answers = answers[:length]
 # ids = ids[:length]
-# sentiments = sentiments[:length]
 # %%
 model_name = "distilbert-base-uncased"
 tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
@@ -90,15 +88,13 @@ def add_token_positions(encodings, answers):
 add_token_positions(encodings, answers)
 # %%
 class TweetDataset(torch.utils.data.Dataset):
-    def __init__(self, encodings):  # , ids, sentiments):
+    def __init__(self, encodings):  # , ids):
         self.encodings = encodings
         # self.ids = ids
-        # self.sentiments = sentiments
 
     def __getitem__(self, idx):
         item = {key: torch.tensor(val[idx]) for key, val in self.encodings.items()}
         # item.update({'textID': self.ids[idx]})
-        # item.update({'sentiment': self.sentiments[idx]})
         return item
 
     def __len__(self):
@@ -114,9 +110,7 @@ def cross_validate(model_name, training_args, dataset, n_splits=5):
     starts = []
     ends = []
     losses = []
-    for i, (train_idx, test_idx) in enumerate(
-        folds.split(np.zeros(n_samples))  # , dataset.sentiments)
-    ):
+    for i, (train_idx, test_idx) in enumerate(folds.split(np.zeros(n_samples))):
         print("\nFold", i)
         train_dataset = Subset(dataset, train_idx)
         val_dataset = Subset(dataset, test_idx)
@@ -168,7 +162,7 @@ with open(model_name + "_pred_off_start", "wb") as f:
 with open(model_name + "_pred_off_end", "wb") as f:
     pickle.dump(end_logits, f)
 #%%
-# preds_path = Path("../output/distilbert-base-uncased_pad112")
+# preds_path = Path("../output/constant-lr")
 
 # with open(preds_path / "distilbert-base-uncased_pred_off_start", "rb") as f:
 #     start_logits = pickle.load(f)
@@ -225,16 +219,16 @@ def logits_to_string_bert(logits, encoding, text):
 
 
 #%%
-# errors = 0
-# predictions = []
-# for i in range(len(logits)):
-#     pred, whole = logits_to_string(logits[i], encodings[i], contexts[i])
-#     predictions.append(pred)
-#     errors += whole
-# print(errors)
+errors = 0
+predictions = []
+for i in range(len(logits)):
+    pred, whole = logits_to_string(logits[i], encodings[i], contexts[i])
+    predictions.append(pred)
+    errors += whole
+print(errors)
 # 99,96% of the predictions have end_idx >= start_idx
 #%%
-predictions = [
+predictions_b = [
     logits_to_string_bert(logits[i], encodings[i], contexts[i])
     for i in range(len(logits))
 ]
@@ -243,7 +237,11 @@ jaccards = [
     words_jaccard(prediction, answer["text"])
     for prediction, answer in zip(predictions, answers)
 ]
-print(mean(jaccards))
+jaccards_b = [
+    words_jaccard(prediction, answer["text"])
+    for prediction, answer in zip(predictions_b, answers)
+]
+print(mean(jaccards), mean(jaccards_b))
 #%%
 # baselines = [
 #     words_jaccard(context, answer["text"])
@@ -255,3 +253,16 @@ print(mean(jaccards))
 #     if jaccards[idx] < .8:
 #         print(idx, jaccards[idx], predictions[idx], "||",  answers[idx]["text"], logits[idx].argmax(0))
 #         print(logits[idx])
+
+#%%
+# jaccards = np.array(jaccards)
+# predictions = np.array(predictions)
+# contexts = np.array(contexts)
+# # %%
+# import matplotlib
+# from matplotlib import pyplot as plt
+# # %%
+# print("There are", len(jaccards), "examples")
+# plt.hist(jaccards)
+# #%%
+# where0 = np.where(jaccards==0)[0]
